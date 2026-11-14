@@ -33,6 +33,7 @@ function idbOpen() {
 async function idbPut(rec) { const db = await idbOpen(); if (!db) return false; return new Promise(res => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').put(rec); tx.oncomplete = () => res(true); tx.onerror = () => res(false); }); }
 async function idbAll() { const db = await idbOpen(); if (!db) return null; return new Promise(res => { const rq = db.transaction('photos', 'readonly').objectStore('photos').getAll(); rq.onsuccess = () => res(rq.result); rq.onerror = () => res(null); }); }
 async function idbDel(id) { const db = await idbOpen(); if (!db) return; return new Promise(res => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').delete(id); tx.oncomplete = () => res(); tx.onerror = () => res(); }); }
+async function idbClear() { const db = await idbOpen(); if (!db) return; return new Promise(res => { const tx = db.transaction('photos', 'readwrite'); tx.objectStore('photos').clear(); tx.oncomplete = () => res(); tx.onerror = () => res(); }); }
 async function fileToJpeg(file) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
   const sc = Math.min(1, 900 / Math.max(bmp.width, bmp.height));
@@ -159,13 +160,84 @@ function vStatus(v) {
     </div>
     <div class="note">Time set karne par workout pending ho to yahan alert dikhta hai. App band hone par notification nahi aa sakta - wo agle version ka kaam hai. Saara data is phone ke browser mein rehta hai; browser data clear/evict hone par delete ho sakta hai.</div>
     <div class="saved"></div>
+  </div>
+  <div class="panel">
+    <div class="ptitle">DATA BACKUP</div>
+    <div class="note">Saara data sirf is phone ke browser mein rehta hai. Backup file download karke safe rakho - ismein saare logs aur photos hote hain.</div>
+    <button class="btn" id="export">EXPORT BACKUP (logs + photos)</button>
+    <input type="file" id="restore" accept="application/json,.json" hidden>
+    <button class="btn" id="restorebtn">RESTORE BACKUP</button>
+    <div class="note">Restore isi browser mein hota hai - naye phone par app kholo, phir restore karo. Photos bhi wapas aa jaati hain. Badi file mein thoda time lag sakta hai.</div>
+    ${confirmDelete ? `<div class="banner">[ PAKKA? ] Saare logs, photos aur profile hamesha ke liye delete ho jaenge. Pehle EXPORT kar liya?</div>
+    <div class="chips">
+      <button class="chip" id="delall-yes">HAAN, SAB DELETE KARO</button>
+      <button class="chip" id="delall-no">CANCEL</button>
+    </div>` : `<button class="btn ghost" id="delall">SAARA DATA DELETE KARO</button>`}
   </div>`;
   bindProfile(v);
+  bindBackup(v);
 }
 function bindProfile(v) {
   const bind = (id, key) => { const el = v.querySelector('#' + id); el.addEventListener('input', () => { S.profile[key] = el.value; save(); }); };
   bind('pname', 'name'); bind('pheight', 'height'); bind('ptime', 'time');
   v.querySelectorAll('[data-place]').forEach(b => b.addEventListener('click', () => { S.profile.place = b.dataset.place; save(); render(); }));
+}
+
+// ---------- backup / delete ----------
+let confirmDelete = false;
+function blobToDataUrl(blob) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('read')); r.readAsDataURL(blob); }); }
+function bindBackup(v) {
+  const ex = v.querySelector('#export');
+  if (ex) ex.addEventListener('click', async () => {
+    try {
+      const rows = (await idbAll()) || [];
+      const photos = [];
+      for (const r of rows) photos.push({ id: r.id, date: r.date, rating: r.rating || '', dataUrl: await blobToDataUrl(r.blob) });
+      const payload = { app: 'fitness-system', version: 1, exportedAt: new Date().toISOString(), fitlog: S, photos };
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'fitness-backup-' + TODAY + '.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    } catch (e) { alert('Backup nahi ban paya. Dobaara try karo.'); }
+  });
+  const rb = v.querySelector('#restorebtn'), ri = v.querySelector('#restore');
+  if (rb && ri) {
+    rb.addEventListener('click', () => ri.click());
+    ri.addEventListener('change', async () => {
+      const f = ri.files && ri.files[0]; ri.value = '';
+      if (!f) return;
+      try {
+        const payload = JSON.parse(await f.text());
+        if (!payload || payload.app !== 'fitness-system' || !payload.fitlog || !payload.fitlog.profile) throw new Error('bad file');
+        S = { profile: Object.assign({ name: '', height: '', time: '', place: '' }, payload.fitlog.profile), days: payload.fitlog.days || {}, weekChecks: payload.fitlog.weekChecks || {} };
+        save();
+        if (IDB_OK && Array.isArray(payload.photos)) {
+          for (const p of payload.photos) {
+            if (!p || !p.id || !p.dataUrl) continue;
+            const blob = await (await fetch(p.dataUrl)).blob();
+            await idbPut({ id: p.id, date: p.date || p.id, blob, rating: p.rating || '' });
+          }
+          await loadPhotos();
+        }
+        render();
+      } catch (e) { alert('Backup file sahi nahi hai. Wahi file chuno jo EXPORT se bani thi.'); }
+    });
+  }
+  const da = v.querySelector('#delall');
+  if (da) da.addEventListener('click', () => { confirmDelete = true; render(); });
+  const dy = v.querySelector('#delall-yes');
+  if (dy) dy.addEventListener('click', async () => {
+    confirmDelete = false;
+    localStorage.removeItem(LS_KEY);
+    S = { profile: { name: '', height: '', time: '', place: '' }, days: {} };
+    await idbClear();
+    PHOTOS = []; PHOTODAYS = new Set();
+    render();
+  });
+  const dn = v.querySelector('#delall-no');
+  if (dn) dn.addEventListener('click', () => { confirmDelete = false; render(); });
 }
 
 // ---------- LOG ----------
